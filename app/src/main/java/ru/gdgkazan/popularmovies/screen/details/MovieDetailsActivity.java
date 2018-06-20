@@ -4,6 +4,7 @@ import android.content.Intent;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.PersistableBundle;
 import android.support.annotation.NonNull;
 import android.support.design.widget.CollapsingToolbarLayout;
 import android.support.v4.app.ActivityCompat;
@@ -18,12 +19,12 @@ import android.view.View;
 import android.widget.ImageView;
 import android.widget.TextView;
 
+import java.util.ArrayList;
 import java.util.List;
 
 import butterknife.BindView;
 import butterknife.ButterKnife;
 import io.realm.Realm;
-import io.realm.ReviewRealmProxy;
 import ru.gdgkazan.popularmovies.R;
 import ru.gdgkazan.popularmovies.model.content.Movie;
 import ru.gdgkazan.popularmovies.model.content.Review;
@@ -76,6 +77,8 @@ public class MovieDetailsActivity extends AppCompatActivity {
     TextView mTrailersTextView;
 
     private CompositeSubscription compositeSubscription;
+    private ArrayList<Video> trailers = new ArrayList<>();
+    private ArrayList<Review> movieReviews = new ArrayList<>();
 
     public static void navigate(@NonNull AppCompatActivity activity, @NonNull View transitionImage,
                                 @NonNull Movie movie) {
@@ -106,72 +109,83 @@ public class MovieDetailsActivity extends AppCompatActivity {
         Movie movie = getIntent().getParcelableExtra(EXTRA_MOVIE);
         showMovie(movie);
 
+        if(savedInstanceState != null){
+            movieReviews = savedInstanceState.getParcelableArrayList("reviews");
+            trailers = savedInstanceState.getParcelableArrayList("trailers");
+            showTrailers(trailers);
+            showReviews(movieReviews);
+        } else {
 
-        LoadingView loadingView = LoadingDialog.view(getSupportFragmentManager());
+            LoadingView loadingView = LoadingDialog.view(getSupportFragmentManager());
 
 
-        MovieService movieService = ApiFactory.getMoviesService();
-        Observable<List<Review>> reviewsObservable = movieService.reviews(String.valueOf(movie.getId()))
-               .map(ReviewsResponse::getReviews)
-                .flatMap((Func1<List<Review>, Observable<List<Review>>>) reviews -> {
+            MovieService movieService = ApiFactory.getMoviesService();
+            Observable<List<Review>> reviewsObservable = movieService.reviews(String.valueOf(movie.getId()))
+                    .map(ReviewsResponse::getReviews)
+                    .flatMap((Func1<List<Review>, Observable<List<Review>>>) reviews -> {
 
-                    Realm.getDefaultInstance().executeTransaction(realm -> {
-                        realm.delete(Review.class);
-                        realm.insert(reviews);
+                        movieReviews.clear();
+                        movieReviews.addAll(reviews);
+
+                        Realm.getDefaultInstance().executeTransaction(realm -> {
+                            realm.delete(Review.class);
+                            realm.insert(reviews);
+                        });
+
+                        return Observable.just(reviews);
+                    })
+                    .observeOn(AndroidSchedulers.mainThread())
+                    .flatMap((Func1<List<Review>, Observable<List<Review>>>) reviews -> {
+                        showReviews(reviews);
+                        return Observable.just(reviews);
+                    })
+                    .subscribeOn(Schedulers.io())
+                    .onErrorResumeNext(throwable -> {
+                        List<Review> reviews = Realm.getDefaultInstance().where(Review.class).findAll();
+                        return Observable.just(Realm.getDefaultInstance().copyFromRealm(reviews));
                     });
 
-                    return Observable.just(reviews);
-                })
-                .observeOn(AndroidSchedulers.mainThread())
-                .flatMap((Func1<List<Review>, Observable<List<Review>>>) reviews -> {
-                    showReviews(reviews);
-                    return Observable.just(reviews);
-                })
-                .subscribeOn(Schedulers.io())
-                .onErrorResumeNext(throwable -> {
-                   List<Review> reviews =  Realm.getDefaultInstance().where(Review.class).findAll();
-                   return Observable.just(Realm.getDefaultInstance().copyFromRealm(reviews));
-                });
+            Observable<List<Video>> videosResponseObservable = movieService.trailers(String.valueOf(movie.getId()))
+                    .map(VideosResponse::getVideos)
+                    .flatMap((Func1<List<Video>, Observable<List<Video>>>) videos -> {
+                        trailers.addAll(videos);
+                        Realm.getDefaultInstance().executeTransaction(realm -> {
+                            realm.delete(Video.class);
+                            realm.insert(videos);
+                        });
 
-        Observable<List<Video>> videosResponseObservable = movieService.trailers(String.valueOf(movie.getId()))
-                .map(VideosResponse::getVideos)
-                .flatMap((Func1<List<Video>, Observable<List<Video>>>) videos -> {
-
-                    Realm.getDefaultInstance().executeTransaction(realm -> {
-                        realm.delete(Video.class);
-                        realm.insert(videos);
+                        return Observable.just(videos);
+                    })
+                    .observeOn(AndroidSchedulers.mainThread())
+                    .subscribeOn(Schedulers.io())
+                    .flatMap((Func1<List<Video>, Observable<List<Video>>>) videos -> {
+                        showTrailers(videos);
+                        return Observable.just(videos);
+                    })
+                    .onErrorResumeNext(throwable -> {
+                        List<Video> videos = Realm.getDefaultInstance().where(Video.class).findAll();
+                        return Observable.just(Realm.getDefaultInstance().copyFromRealm(videos));
                     });
 
-                    return Observable.just(videos);
-                })
-                .observeOn(AndroidSchedulers.mainThread())
-                .subscribeOn(Schedulers.io())
-                .flatMap((Func1<List<Video>, Observable<List<Video>>>) videos -> {
-                    showTrailers(videos);
-                    return Observable.just(videos);
-                })
-                .onErrorResumeNext(throwable -> {
-                    List<Video> videos =  Realm.getDefaultInstance().where(Video.class).findAll();
-                    return Observable.just(Realm.getDefaultInstance().copyFromRealm(videos));
-                });
 
+            reviewsObservable.zipWith(videosResponseObservable, new Func2<List<Review>, List<Video>, Boolean>() {
 
-        reviewsObservable.zipWith(videosResponseObservable, new Func2<List<Review>, List<Video>, Boolean>() {
+                @Override
+                public Boolean call(List<Review> reviews, List<Video> videos) {
+                    return true;
+                }
+            })
+                    .observeOn(AndroidSchedulers.mainThread())
+                    .doOnSubscribe(loadingView::showLoadingIndicator)
+                    .doAfterTerminate(loadingView::hideLoadingIndicator)
+                    .subscribe(new Action1<Boolean>() {
+                        @Override
+                        public void call(Boolean aBoolean) {
 
-            @Override
-            public Boolean call(List<Review> reviews, List<Video> videos) {
-                return true;
-            }
-        })
-                .observeOn(AndroidSchedulers.mainThread())
-                .doOnSubscribe(loadingView::showLoadingIndicator)
-                .doAfterTerminate(loadingView::hideLoadingIndicator)
-                .subscribe(new Action1<Boolean>() {
-                    @Override
-                    public void call(Boolean aBoolean) {
+                        }
+                    });
 
-                    }
-                });
+        }
 
 
 
@@ -264,6 +278,14 @@ public class MovieDetailsActivity extends AppCompatActivity {
 
         }
 
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
+
+        outState.putParcelableArrayList("trailers", trailers);
+        outState.putParcelableArrayList("reviews", movieReviews);
     }
 
 }
